@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>Network Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
+<style>
+body { font-family: Arial, sans-serif; padding: 20px; background: #0f172a; color: #e5e7eb; }
+h1 { text-align: center; margin-bottom: 16px; }
+.host { margin-bottom: 16px; cursor: pointer; }
+.host-title { font-weight: bold; background: #1f2937; padding: 10px; border-radius: 8px; }
+.interfaces { display: none; margin-top: 5px; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 10px; background: #111827; }
+th, td { border: 1px solid #374151; padding: 8px; text-align: center; }
+th { background-color: #1f2937; }
+.bps { font-weight: bold; color: #22c55e; }
+.btn { padding: 8px 12px; border: 0; border-radius: 8px; color: #fff; cursor: pointer; font-weight: 600; }
+.btn-up { background: #16a34a; }
+.btn-down { background: #dc2626; }
+.btn.disabled { opacity: .6; cursor: not-allowed; }
+
+/* Dropdown confirmation */
+.dropdown { position: relative; display: inline-block; }
+.menu { 
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 180px;
+  background: #0b1220;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  box-shadow: 0 10px 20px rgba(0,0,0,.35);
+  padding: 6px;
+  z-index: 50;
+}
+.menu-row { display: flex; gap: 6px; }
+.menu button {
+  flex: 1 1 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.confirm { background: #16a34a; color: #fff; }
+.cancel { background: #374151; color: #e5e7eb; }
+</style>
+</head>
+<body>
+<h1>Network Dashboard</h1>
+<div id="hosts"></div>
+
+<script>
+/* global io */ // บอก linter/TS ว่า io เป็น global ที่มาจาก socket.io script ข้างบน
+const socket = io(); // เริ่มเชื่อมต่อกับเซิร์ฟเวอร์
+let hostData = {};
+
+function idSafe(str) {
+  // convert host/index to safe id parts
+  return String(str).replace(/[^a-zA-Z0-9_.-]/g, '_');
+}
+
+function menuId(host, index) {
+  return `menu-${idSafe(host)}-${index}`;
+}
+
+function createTable(host) {
+  const data = hostData[host];
+  const container = document.getElementById(`interfaces-${host}`);
+  container.innerHTML = '';
+
+  const table = document.createElement('table');
+  const header = document.createElement('tr');
+  header.innerHTML = '<th>Interface</th><th>Admin</th><th>Oper</th><th>In bps</th><th>Out bps</th><th>Action</th>';
+  table.appendChild(header);
+
+  data.interfaces.forEach(iface => {
+    const tr = document.createElement('tr');
+    const inBps = data.traffic[iface.index] ? data.traffic[iface.index].in_bps.toFixed(2) : '0';
+    const outBps = data.traffic[iface.index] ? data.traffic[iface.index].out_bps.toFixed(2) : '0';
+
+    // ปุ่มสั่ง + dropdown สำหรับ physical interface 2-4
+    let actionCell = '';
+    if (iface.index >= 2 && iface.index <= 4) {
+      const isUp = parseInt(iface.admin) === 1;
+      const nextAdmin = isUp ? 2 : 1;
+      const label = isUp ? 'หยุดการทำงาน' : 'เริ่มการทำงาน';
+      const btnClass = isUp ? 'btn-down' : 'btn-up';
+      const mid = menuId(host, iface.index);
+
+      actionCell = `
+      <div class="dropdown">
+        <button class="btn ${btnClass}"
+          data-action="toggle-open"
+          data-host="${host}"
+          data-index="${iface.index}"
+          data-current="${iface.admin}">
+          ${label} ▼
+        </button>
+        <div class="menu" id="${mid}" hidden>
+          <div class="menu-row">
+            <button class="confirm"
+              data-action="confirm-toggle"
+              data-host="${host}"
+              data-index="${iface.index}"
+              data-current="${iface.admin}">ยืนยัน</button>
+            <button class="cancel"
+              data-action="cancel-toggle"
+              data-host="${host}"
+              data-index="${iface.index}"
+              data-current="${iface.admin}">ยกเลิก</button>
+          </div>
+        </div>
+      </div>
+      `;
+    }
+
+    tr.innerHTML = `
+      <td>${iface.descr}</td>
+      <td>${iface.admin}</td>
+      <td>${iface.oper}</td>
+      <td class="bps">${inBps}</td>
+      <td class="bps">${outBps}</td>
+      <td>${actionCell}</td>
+    `;
+    table.appendChild(tr);
+  });
+  container.appendChild(table);
+}
+
+function toggleHost(host) {
+  const container = document.getElementById(`interfaces-${host}`);
+  if (container.style.display === 'none') {
+    createTable(host);
+    container.style.display = 'block';
+  } else {
+    container.style.display = 'none';
+  }
+}
+
+function closeAllMenus() {
+  document.querySelectorAll('.menu').forEach(m => m.hidden = true);
+}
+
+function doToggle(host, index, currentAdmin) {
+  const isUp = parseInt(currentAdmin) === 1;
+  const nextAdmin = isUp ? 2 : 1;
+
+  // ปิดทุกเมนูก่อนส่งคำสั่ง
+  closeAllMenus();
+
+  fetch('/api/set_interface', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host: host, index: parseInt(index), admin: nextAdmin })
+  })
+  .then(res => res.json())
+  .then(res => {
+    if (!res.ok) {
+      alert(`Error: ${res.error || 'unknown error'}`);
+    } else {
+      console.log(`Interface ${index} on ${host} set to ${nextAdmin}`);
+    }
+  })
+  .catch(err => {
+    console.error(err);
+    alert('Network error');
+  });
+}
+
+// เปิด/ปิดเมนูด้วย event delegation
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-action]');
+  if (!btn) {
+    closeAllMenus();
+    return;
+  }
+
+  const action = btn.getAttribute('data-action');
+  const host = btn.getAttribute('data-host');
+  const index = btn.getAttribute('data-index');
+  const current = btn.getAttribute('data-current');
+
+  if (action === 'toggle-open') {
+    const mid = menuId(host, index);
+    const menu = document.getElementById(mid);
+    if (!menu) return;
+    const wasHidden = menu.hidden;
+    closeAllMenus();
+    menu.hidden = !wasHidden; // toggle
+  } else if (action === 'confirm-toggle') {
+    doToggle(host, index, current);
+  } else if (action === 'cancel-toggle') {
+    closeAllMenus();
+  }
+});
+
+// ใช้เชื่อมต่อกับเซิร์ฟเวอร์
+socket.on('connect', () => console.log('Connected to server'));
+
+socket.on('interfaces', (allHosts) => {
+  const container = document.getElementById('hosts');
+  allHosts.forEach(h => {
+    if (!hostData[h.host]) hostData[h.host] = { interfaces: h.interfaces, traffic: {} };
+
+    if (!document.getElementById(`host-${h.host}`)) {
+      const div = document.createElement('div');
+      div.className = 'host';
+      div.id = `host-${h.host}`;
+      div.innerHTML = `
+        <div class="host-title" onclick="toggleHost('${h.host}')">${h.host}</div>
+        <div class="interfaces" id="interfaces-${h.host}"></div>
+      `;
+      container.appendChild(div);
+    } else {
+      hostData[h.host].interfaces = h.interfaces;
+    }
+
+    // ถ้า section เปิดอยู่ ให้รีเฟรชข้อมูลใหม่ทันที
+    const section = document.getElementById(`interfaces-${h.host}`);
+    if (section && section.style.display === 'block') {
+      createTable(h.host);
+    }
+  });
+});
+
+socket.on('traffic_update', (point) => {
+  if (!hostData[point.host]) hostData[point.host] = { interfaces: [], traffic: {} };
+  hostData[point.host].traffic[point.iface_index] = { in_bps: point.in_bps, out_bps: point.out_bps };
+
+  const container = document.getElementById(`interfaces-${point.host}`);
+  if (container && container.style.display === 'block') createTable(point.host);
+});
+</script>
+</body>
+</html>
